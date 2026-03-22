@@ -21,6 +21,7 @@ const (
 	FailureNotYetValid  FailureCode = "cert_not_yet_valid"
 	FailureWeakKey      FailureCode = "weak_key"
 	FailureNoClientAuth FailureCode = "no_client_auth_eku"
+	FailureNoServerAuth FailureCode = "no_server_auth_eku"
 )
 
 // CertInfo holds a serializable summary of an X.509 certificate.
@@ -69,11 +70,20 @@ type InspectParams struct {
 	Mode       string
 	TrustedCA  *x509.Certificate
 	CARootPool *x509.CertPool
+	Direction  string // "inbound" (default/empty) or "outbound"
 }
 
 // Inspect analyzes TLS connection state and produces a diagnostic report.
+// Direction "outbound" checks the server's certificate (for ping/probe);
+// empty or "inbound" checks the client's certificate (default server behavior).
 func Inspect(params InspectParams) *InspectionReport {
 	now := time.Now()
+	outbound := params.Direction == "outbound"
+	certLabel := "client"
+	if outbound {
+		certLabel = "server"
+	}
+
 	report := &InspectionReport{
 		Timestamp: now.Format(time.RFC3339),
 		Expected: Expected{
@@ -85,7 +95,7 @@ func Inspect(params InspectParams) *InspectionReport {
 		report.Expected.TrustedCA = params.TrustedCA.Subject.CommonName
 	}
 
-	// No TLS state at all (defensive — shouldn't happen on a TLS listener).
+	// No TLS state at all.
 	if params.TLSState == nil {
 		report.FailureCode = FailureNoCert
 		report.FailureReason = "connection is not TLS"
@@ -106,7 +116,7 @@ func Inspect(params InspectParams) *InspectionReport {
 	// Check 1: No peer certificates.
 	if len(params.TLSState.PeerCertificates) == 0 {
 		report.FailureCode = FailureNoCert
-		report.FailureReason = "client certificate not presented"
+		report.FailureReason = certLabel + " certificate not presented"
 		report.Hints = GenerateHints(FailureNoCert, nil, report.Expected.TrustedCA)
 		return report
 	}
@@ -117,7 +127,7 @@ func Inspect(params InspectParams) *InspectionReport {
 	// Check 2: Weak key.
 	if isWeakKey(peer) {
 		report.FailureCode = FailureWeakKey
-		report.FailureReason = fmt.Sprintf("client certificate uses a weak key: %s %d-bit", peerInfo.KeyType, peerInfo.KeyBits)
+		report.FailureReason = fmt.Sprintf("%s certificate uses a weak key: %s %d-bit", certLabel, peerInfo.KeyType, peerInfo.KeyBits)
 		report.Hints = GenerateHints(FailureWeakKey, &peerInfo, report.Expected.TrustedCA)
 		return report
 	}
@@ -125,7 +135,7 @@ func Inspect(params InspectParams) *InspectionReport {
 	// Check 3: Expired.
 	if now.After(peer.NotAfter) {
 		report.FailureCode = FailureExpired
-		report.FailureReason = fmt.Sprintf("client certificate expired on %s", peer.NotAfter.Format(time.RFC3339))
+		report.FailureReason = fmt.Sprintf("%s certificate expired on %s", certLabel, peer.NotAfter.Format(time.RFC3339))
 		report.Hints = GenerateHints(FailureExpired, &peerInfo, report.Expected.TrustedCA)
 		return report
 	}
@@ -133,28 +143,41 @@ func Inspect(params InspectParams) *InspectionReport {
 	// Check 4: Not yet valid.
 	if now.Before(peer.NotBefore) {
 		report.FailureCode = FailureNotYetValid
-		report.FailureReason = fmt.Sprintf("client certificate is not valid until %s", peer.NotBefore.Format(time.RFC3339))
+		report.FailureReason = fmt.Sprintf("%s certificate is not valid until %s", certLabel, peer.NotBefore.Format(time.RFC3339))
 		report.Hints = GenerateHints(FailureNotYetValid, &peerInfo, report.Expected.TrustedCA)
 		return report
 	}
 
-	// Check 5: Missing ClientAuth EKU.
-	if !hasClientAuthEKU(peer) {
-		report.FailureCode = FailureNoClientAuth
-		report.FailureReason = "client certificate does not include the ClientAuth extended key usage"
-		report.Hints = GenerateHints(FailureNoClientAuth, &peerInfo, report.Expected.TrustedCA)
-		return report
+	// Check 5: EKU check (direction-dependent).
+	if outbound {
+		if !hasServerAuthEKU(peer) {
+			report.FailureCode = FailureNoServerAuth
+			report.FailureReason = "server certificate does not include the ServerAuth extended key usage"
+			report.Hints = GenerateHints(FailureNoServerAuth, &peerInfo, report.Expected.TrustedCA)
+			return report
+		}
+	} else {
+		if !hasClientAuthEKU(peer) {
+			report.FailureCode = FailureNoClientAuth
+			report.FailureReason = "client certificate does not include the ClientAuth extended key usage"
+			report.Hints = GenerateHints(FailureNoClientAuth, &peerInfo, report.Expected.TrustedCA)
+			return report
+		}
 	}
 
 	// Check 6: Chain verification (wrong CA).
 	if params.CARootPool != nil {
+		eku := x509.ExtKeyUsageClientAuth
+		if outbound {
+			eku = x509.ExtKeyUsageServerAuth
+		}
 		_, err := peer.Verify(x509.VerifyOptions{
 			Roots:     params.CARootPool,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			KeyUsages: []x509.ExtKeyUsage{eku},
 		})
 		if err != nil {
 			report.FailureCode = FailureWrongCA
-			report.FailureReason = fmt.Sprintf("client certificate chain verification failed: %v", err)
+			report.FailureReason = fmt.Sprintf("%s certificate chain verification failed: %v", certLabel, err)
 			report.Hints = GenerateHints(FailureWrongCA, &peerInfo, report.Expected.TrustedCA)
 			return report
 		}
@@ -237,6 +260,18 @@ func hasClientAuthEKU(cert *x509.Certificate) bool {
 	}
 	for _, eku := range cert.ExtKeyUsage {
 		if eku == x509.ExtKeyUsageClientAuth || eku == x509.ExtKeyUsageAny {
+			return true
+		}
+	}
+	return false
+}
+
+func hasServerAuthEKU(cert *x509.Certificate) bool {
+	if len(cert.ExtKeyUsage) == 0 {
+		return true
+	}
+	for _, eku := range cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageServerAuth || eku == x509.ExtKeyUsageAny {
 			return true
 		}
 	}

@@ -454,6 +454,104 @@ func TestBuildCertInfo(t *testing.T) {
 	}
 }
 
+// issueServerCert issues a valid server certificate from the test CA.
+func (ca *testCA) issueServerCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(20),
+		Subject:      pkix.Name{CommonName: "test-server"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return cert
+}
+
+func TestInspect_Outbound_ValidServerCert(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueServerCert(t)
+
+	report := Inspect(InspectParams{
+		TLSState: &tls.ConnectionState{
+			Version:          tls.VersionTLS13,
+			PeerCertificates: []*x509.Certificate{serverCert},
+		},
+		Mode:       "probe",
+		TrustedCA:  ca.cert,
+		CARootPool: ca.pool,
+		Direction:  "outbound",
+	})
+
+	if !report.HandshakeOK {
+		t.Errorf("expected handshake OK, got failure: %s (%s)", report.FailureReason, report.FailureCode)
+	}
+}
+
+func TestInspect_Outbound_NoServerAuthEKU(t *testing.T) {
+	ca := newTestCA(t)
+	// Use a client cert (ClientAuth EKU only) as the server cert.
+	clientCert := ca.issueClientCert(t)
+
+	report := Inspect(InspectParams{
+		TLSState: &tls.ConnectionState{
+			Version:          tls.VersionTLS13,
+			PeerCertificates: []*x509.Certificate{clientCert},
+		},
+		Mode:       "probe",
+		TrustedCA:  ca.cert,
+		CARootPool: ca.pool,
+		Direction:  "outbound",
+	})
+
+	if report.HandshakeOK {
+		t.Error("expected handshake failure for client cert used as server")
+	}
+	if report.FailureCode != FailureNoServerAuth {
+		t.Errorf("expected failure_code=%q, got %q", FailureNoServerAuth, report.FailureCode)
+	}
+}
+
+func TestInspect_Outbound_BackwardCompat(t *testing.T) {
+	ca := newTestCA(t)
+	clientCert := ca.issueClientCert(t)
+
+	// Empty Direction should behave as inbound (check ClientAuth EKU).
+	report := Inspect(InspectParams{
+		TLSState: &tls.ConnectionState{
+			Version:          tls.VersionTLS13,
+			PeerCertificates: []*x509.Certificate{clientCert},
+		},
+		Mode:       "strict",
+		TrustedCA:  ca.cert,
+		CARootPool: ca.pool,
+		Direction:  "", // empty = inbound
+	})
+
+	if !report.HandshakeOK {
+		t.Errorf("expected handshake OK for client cert in inbound mode, got: %s", report.FailureReason)
+	}
+}
+
 func TestTLSVersionName(t *testing.T) {
 	tests := []struct {
 		version uint16

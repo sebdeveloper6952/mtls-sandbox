@@ -1,0 +1,10 @@
+# Reverse proxy for the dashboard and health API.
+# Caddy automatically provisions a Let's Encrypt TLS certificate for the domain.
+#
+# Architecture:
+#   https://mtls.apps.sebdev.io (port 443) → dashboard/health API (no mTLS)
+#   mtls.apps.sebdev.io:8443               → mTLS endpoint (sandbox self-signed CA)
+
+mtls.apps.sebdev.io {
+	reverse_proxy mtls-sandbox:8080
+}

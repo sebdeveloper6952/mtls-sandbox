@@ -10,12 +10,23 @@ import (
 )
 
 type Config struct {
-	Mode       string    `yaml:"mode"`
-	Port       int       `yaml:"port"`
-	HealthPort int       `yaml:"health_port"`
-	TLS        TLSConfig `yaml:"tls"`
-	Hostnames  []string  `yaml:"hostnames"`
-	Log        LogConfig `yaml:"log"`
+	Mode       string      `yaml:"mode"`
+	Port       int         `yaml:"port"`
+	HealthPort int         `yaml:"health_port"`
+	TLS        TLSConfig   `yaml:"tls"`
+	Hostnames  []string    `yaml:"hostnames"`
+	Log        LogConfig   `yaml:"log"`
+	Mock       MockConfig  `yaml:"mock"`
+	Store      StoreConfig `yaml:"store"`
+}
+
+type MockConfig struct {
+	RoutesFile string `yaml:"routes_file"`
+}
+
+type StoreConfig struct {
+	Capacity int    `yaml:"capacity"`
+	LogFile  string `yaml:"log_file"`
 }
 
 type TLSConfig struct {
@@ -46,6 +57,9 @@ func Defaults() *Config {
 		Log: LogConfig{
 			Level:  "info",
 			Format: "json",
+		},
+		Store: StoreConfig{
+			Capacity: 500,
 		},
 	}
 }
@@ -103,6 +117,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log format must be json or text; got %q", c.Log.Format)
 	}
 
+	if c.Store.Capacity <= 0 {
+		return fmt.Errorf("store capacity must be positive; got %d", c.Store.Capacity)
+	}
+
 	return nil
 }
 
@@ -152,5 +170,16 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v, ok := os.LookupEnv("MTLS_LOG_FILE"); ok {
 		cfg.Log.File = v
+	}
+	if v, ok := os.LookupEnv("MTLS_MOCK_ROUTES_FILE"); ok {
+		cfg.Mock.RoutesFile = v
+	}
+	if v, ok := os.LookupEnv("MTLS_STORE_CAPACITY"); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Store.Capacity = n
+		}
+	}
+	if v, ok := os.LookupEnv("MTLS_STORE_LOG_FILE"); ok {
+		cfg.Store.LogFile = v
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/inspector"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
 )
 
 type responseRecorder struct {
@@ -47,6 +48,38 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		}
 
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "request", attrs...)
+	})
+}
+
+// recordingMiddleware captures request metadata and the inspection report,
+// storing each request in the request store.
+func (s *Server) recordingMiddleware(next http.Handler) http.Handler {
+	if s.store == nil {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		entry := store.RequestEntry{
+			Timestamp: time.Now().Format(time.RFC3339),
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Status:    rec.statusCode,
+			LatencyMS: time.Since(start).Milliseconds(),
+			Report:    s.inspect(r),
+		}
+
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			peer := r.TLS.PeerCertificates[0]
+			entry.CertCN = peer.Subject.CommonName
+			entry.CertSANs = peer.DNSNames
+		}
+
+		s.store.Append(entry)
 	})
 }
 

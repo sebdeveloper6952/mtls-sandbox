@@ -18,6 +18,8 @@ func GenerateHints(code FailureCode, certInfo *CertInfo, trustedCA string) []str
 		return weakKeyHints(certInfo)
 	case FailureNoClientAuth:
 		return noClientAuthHints()
+	case FailureNoServerAuth:
+		return noServerAuthHints()
 	default:
 		return nil
 	}
@@ -70,5 +72,13 @@ func noClientAuthHints() []string {
 		"Your certificate does not include the ClientAuth extended key usage (EKU).",
 		"This usually means a server certificate is being used as a client certificate by mistake.",
 		"Issue a new certificate with ExtKeyUsage set to ClientAuth.",
+	}
+}
+
+func noServerAuthHints() []string {
+	return []string{
+		"The server's certificate does not include the ServerAuth extended key usage (EKU).",
+		"This usually means a client certificate is being used as the server certificate by mistake.",
+		"Issue a new server certificate with ExtKeyUsage set to ServerAuth.",
 	}
 }

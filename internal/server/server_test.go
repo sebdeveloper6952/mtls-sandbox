@@ -9,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/config"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ca"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
 )
 
 type testEnv struct {
@@ -63,7 +65,12 @@ func startServer(t *testing.T, env *testEnv) (mtlsURL, healthURL string, cancel 
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv, err := New(env.cfg, env.caCertPEM, env.serverCertPEM, env.serverKeyPEM, logger)
+	reqStore, _ := store.NewStore(100, "")
+	srv, err := New(env.cfg, env.caCertPEM, env.serverCertPEM, env.serverKeyPEM, logger, Deps{
+		Store:         reqStore,
+		ClientCertPEM: env.clientCertPEM,
+		ClientKeyPEM:  env.clientKeyPEM,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,6 +444,150 @@ func TestHealthEndpoint(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&body)
 	if body["status"] != "ok" {
 		t.Errorf("expected status ok, got %v", body["status"])
+	}
+}
+
+func TestStatusEndpoint(t *testing.T) {
+	env := setupTestEnv(t, "strict")
+	env.cfg.Port = 18460
+	env.cfg.HealthPort = 18461
+
+	_, healthURL, cancel := startServer(t, env)
+	defer cancel()
+
+	resp, err := http.Get(healthURL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["mode"] != "strict" {
+		t.Errorf("expected mode strict, got %v", body["mode"])
+	}
+	if body["mtls_port"] == nil {
+		t.Error("expected mtls_port in status")
+	}
+}
+
+func TestCertsEndpoint(t *testing.T) {
+	env := setupTestEnv(t, "strict")
+	env.cfg.Port = 18462
+	env.cfg.HealthPort = 18463
+
+	_, healthURL, cancel := startServer(t, env)
+	defer cancel()
+
+	resp, err := http.Get(healthURL + "/api/certs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]any
+	json.NewDecoder(resp.Body).Decode(&body)
+
+	for _, role := range []string{"ca", "server", "client"} {
+		cert, ok := body[role].(map[string]any)
+		if !ok {
+			t.Errorf("expected %s cert info", role)
+			continue
+		}
+		if cert["cn"] == nil {
+			t.Errorf("expected cn for %s cert", role)
+		}
+		if cert["pem"] == nil {
+			t.Errorf("expected pem for %s cert", role)
+		}
+	}
+
+	// Client should have key_pem
+	client := body["client"].(map[string]any)
+	if client["key_pem"] == nil {
+		t.Error("expected key_pem for client cert")
+	}
+}
+
+func TestRequestsEndpoint(t *testing.T) {
+	env := setupTestEnv(t, "strict")
+	env.cfg.Port = 18464
+	env.cfg.HealthPort = 18465
+
+	mtlsURL, healthURL, cancel := startServer(t, env)
+	defer cancel()
+
+	// Make a request to the mTLS server to generate a log entry.
+	client := env.tlsClientWithCert(t)
+	resp, err := client.Get(mtlsURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Give recording middleware time to write.
+	time.Sleep(50 * time.Millisecond)
+
+	// Check the request log.
+	resp, err = http.Get(healthURL + "/api/requests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var entries []map[string]any
+	json.NewDecoder(resp.Body).Decode(&entries)
+
+	if len(entries) == 0 {
+		t.Fatal("expected at least one request entry")
+	}
+
+	entry := entries[0]
+	if entry["method"] != "GET" {
+		t.Errorf("expected GET, got %v", entry["method"])
+	}
+	if entry["path"] != "/" {
+		t.Errorf("expected /, got %v", entry["path"])
+	}
+
+	// Test individual entry retrieval.
+	id := entry["id"].(string)
+	resp2, err := http.Get(healthURL + "/api/requests/" + id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp2.StatusCode)
+	}
+}
+
+func TestDashboardServed(t *testing.T) {
+	env := setupTestEnv(t, "strict")
+	env.cfg.Port = 18466
+	env.cfg.HealthPort = 18467
+
+	_, healthURL, cancel := startServer(t, env)
+	defer cancel()
+
+	resp, err := http.Get(healthURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "mTLS Sandbox") {
+		t.Error("expected dashboard HTML to contain 'mTLS Sandbox'")
 	}
 }
 

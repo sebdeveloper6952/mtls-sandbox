@@ -1,0 +1,34 @@
+routes:
+  - path: /api/v1/payments
+    method: POST
+    response:
+      status: 200
+      body: '{"transaction_id": "txn_{{uuid}}", "status": "ACCEPTED", "timestamp": "{{timestamp}}"}'
+      headers:
+        Content-Type: application/json
+        X-Request-Id: "{{uuid}}"
+
+  - path: /api/v1/accounts/:id
+    method: GET
+    response:
+      status: 200
+      body: '{"account_id": "{{param.id}}", "balance": 1000.00, "currency": "USD"}'
+      headers:
+        Content-Type: application/json
+
+  - path: /api/v1/health
+    method: GET
+    response:
+      status: 200
+      body: '{"status": "healthy"}'
+      headers:
+        Content-Type: application/json
+
+  - path: /api/v1/slow
+    method: GET
+    response:
+      status: 200
+      delay: "500ms"
+      body: '{"message": "this response was delayed by 500ms"}'
+      headers:
+        Content-Type: application/json
