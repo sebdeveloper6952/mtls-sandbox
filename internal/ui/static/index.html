@@ -9,54 +9,18 @@
 <body>
   <header id="status-bar">
     <div class="status-left">
-      <h1>mTLS Sandbox</h1>
-      <span id="mode-badge" class="badge">--</span>
+      <a href="#/" class="logo">mTLS Sandbox</a>
+      <nav class="nav-links">
+        <a href="#/">Sessions</a>
+        <a href="#/monitor">Monitor</a>
+      </nav>
     </div>
     <div class="status-right">
       <span id="uptime">Uptime: --</span>
-      <span id="cert-expiry">Client cert expires: --</span>
     </div>
   </header>
 
-  <main>
-    <section id="certs-panel" class="panel">
-      <h2 class="panel-header" data-toggle="certs-content">Certificates</h2>
-      <div id="certs-content" class="panel-body">
-        <div class="cert-cards" id="cert-cards"></div>
-      </div>
-    </section>
-
-    <section id="quick-test" class="panel">
-      <h2 class="panel-header" data-toggle="quick-test-content">Quick Test</h2>
-      <div id="quick-test-content" class="panel-body">
-        <div class="curl-commands" id="curl-commands"></div>
-      </div>
-    </section>
-
-    <div class="split-view">
-      <section id="request-log" class="panel">
-        <h2>Request Log <span id="request-count" class="count-badge">0</span></h2>
-        <table id="requests-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Method</th>
-              <th>Path</th>
-              <th>Cert CN</th>
-              <th>Result</th>
-              <th>Latency</th>
-            </tr>
-          </thead>
-          <tbody id="requests-body"></tbody>
-        </table>
-      </section>
-
-      <section id="detail-panel" class="panel hidden">
-        <h2>Inspection Detail</h2>
-        <div id="detail-content"></div>
-      </section>
-    </div>
-  </main>
+  <main id="app"></main>
 
   <script src="app.js"></script>
 </body>

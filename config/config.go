@@ -10,14 +10,23 @@ import (
 )
 
 type Config struct {
-	Mode       string      `yaml:"mode"`
-	Port       int         `yaml:"port"`
-	HealthPort int         `yaml:"health_port"`
-	TLS        TLSConfig   `yaml:"tls"`
-	Hostnames  []string    `yaml:"hostnames"`
-	Log        LogConfig   `yaml:"log"`
-	Mock       MockConfig  `yaml:"mock"`
-	Store      StoreConfig `yaml:"store"`
+	Mode       string        `yaml:"mode"`
+	Port       int           `yaml:"port"`
+	HealthPort int           `yaml:"health_port"`
+	TLS        TLSConfig     `yaml:"tls"`
+	Hostnames  []string      `yaml:"hostnames"`
+	Log        LogConfig     `yaml:"log"`
+	Mock       MockConfig    `yaml:"mock"`
+	Store      StoreConfig   `yaml:"store"`
+	Session    SessionConfig `yaml:"session"`
+}
+
+type SessionConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	DBPath     string `yaml:"db_path"`
+	MaxAge     string `yaml:"max_age"`
+	RateLimit  int    `yaml:"rate_limit"`
+	RateWindow string `yaml:"rate_window"`
 }
 
 type MockConfig struct {
@@ -60,6 +69,13 @@ func Defaults() *Config {
 		},
 		Store: StoreConfig{
 			Capacity: 500,
+		},
+		Session: SessionConfig{
+			Enabled:    true,
+			DBPath:     "sessions.db",
+			MaxAge:     "24h",
+			RateLimit:  10,
+			RateWindow: "60s",
 		},
 	}
 }
@@ -181,5 +197,22 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v, ok := os.LookupEnv("MTLS_STORE_LOG_FILE"); ok {
 		cfg.Store.LogFile = v
+	}
+	if v, ok := os.LookupEnv("MTLS_SESSION_ENABLED"); ok {
+		cfg.Session.Enabled = v == "true" || v == "1"
+	}
+	if v, ok := os.LookupEnv("MTLS_SESSION_DB_PATH"); ok {
+		cfg.Session.DBPath = v
+	}
+	if v, ok := os.LookupEnv("MTLS_SESSION_MAX_AGE"); ok {
+		cfg.Session.MaxAge = v
+	}
+	if v, ok := os.LookupEnv("MTLS_SESSION_RATE_LIMIT"); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Session.RateLimit = n
+		}
+	}
+	if v, ok := os.LookupEnv("MTLS_SESSION_RATE_WINDOW"); ok {
+		cfg.Session.RateWindow = v
 	}
 }

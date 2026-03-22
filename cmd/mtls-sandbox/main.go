@@ -12,13 +12,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"time"
 	"syscall"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/config"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ca"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/client"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/mock"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/ratelimit"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/server"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/session"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
 )
 
@@ -105,11 +108,52 @@ func runServe(args []string) {
 		logger.Info("mock routes loaded", "file", cfg.Mock.RoutesFile, "routes", len(mockCfg.Routes))
 	}
 
+	// Initialize session store if enabled.
+	var sessStore *session.Store
+	var limiter *ratelimit.Limiter
+	if cfg.Session.Enabled {
+		maxAge, err := time.ParseDuration(cfg.Session.MaxAge)
+		if err != nil {
+			logger.Error("invalid session max_age", "error", err)
+			os.Exit(1)
+		}
+		sessStore, err = session.NewStore(cfg.Session.DBPath, authority, maxAge)
+		if err != nil {
+			logger.Error("failed to initialize session store", "error", err)
+			os.Exit(1)
+		}
+		defer sessStore.Close()
+
+		rateWindow, err := time.ParseDuration(cfg.Session.RateWindow)
+		if err != nil {
+			logger.Error("invalid session rate_window", "error", err)
+			os.Exit(1)
+		}
+		limiter = ratelimit.New(cfg.Session.RateLimit, rateWindow)
+
+		// Background cleanup of expired sessions.
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				if n, err := sessStore.CleanExpired(); err != nil {
+					logger.Error("session cleanup error", "error", err)
+				} else if n > 0 {
+					logger.Info("cleaned expired sessions", "count", n)
+				}
+			}
+		}()
+
+		logger.Info("session store initialized", "db", cfg.Session.DBPath, "max_age", cfg.Session.MaxAge)
+	}
+
 	srv, err := server.New(cfg, authority.CertPEM, serverCertPEM, serverKeyPEM, logger, server.Deps{
 		Store:         reqStore,
 		MockRouter:    mockRouter,
 		ClientCertPEM: clientCertPEM,
 		ClientKeyPEM:  clientKeyPEM,
+		SessionStore:  sessStore,
+		RateLimiter:   limiter,
 	})
 	if err != nil {
 		logger.Error("failed to create server", "error", err)

@@ -10,12 +10,17 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/config"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/client"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/mock"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/ratelimit"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/safedial"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/session"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ui"
 )
@@ -26,6 +31,8 @@ type Deps struct {
 	MockRouter    *mock.Router
 	ClientCertPEM []byte
 	ClientKeyPEM  []byte
+	SessionStore  *session.Store
+	RateLimiter   *ratelimit.Limiter
 }
 
 type Server struct {
@@ -39,6 +46,8 @@ type Server struct {
 
 	store         *store.Store
 	mockRouter    *mock.Router
+	sessionStore  *session.Store
+	rateLimiter   *ratelimit.Limiter
 	caCertPEM     []byte
 	serverCertPEM []byte
 	clientCertPEM []byte
@@ -87,6 +96,8 @@ func New(cfg *config.Config, caCertPEM, serverCertPEM, serverKeyPEM []byte, logg
 		caPool:        caPool,
 		store:         deps.Store,
 		mockRouter:    deps.MockRouter,
+		sessionStore:  deps.SessionStore,
+		rateLimiter:   deps.RateLimiter,
 		caCertPEM:     caCertPEM,
 		serverCertPEM: serverCertPEM,
 		clientCertPEM: deps.ClientCertPEM,
@@ -123,6 +134,10 @@ func New(cfg *config.Config, caCertPEM, serverCertPEM, serverKeyPEM []byte, logg
 	healthMux.HandleFunc("/api/certs/client-key", s.rawCertHandler(s.clientKeyPEM, "client.key"))
 	healthMux.HandleFunc("/api/requests", s.listRequestsHandler)
 	healthMux.HandleFunc("/api/requests/", s.getRequestHandler)
+	if s.sessionStore != nil {
+		healthMux.HandleFunc("/api/sessions", s.createSessionHandler)
+		healthMux.HandleFunc("/api/sessions/", s.sessionRouter)
+	}
 	healthMux.Handle("/", ui.Handler())
 
 	s.healthServer = &http.Server{
@@ -286,4 +301,226 @@ func (s *Server) getRequestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(entry)
+}
+
+// --- Session API handlers ---
+
+func (s *Server) createSessionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	sess, err := s.sessionStore.Create()
+	if err != nil {
+		s.logger.Error("failed to create session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(sess)
+}
+
+// sessionRouter dispatches /api/sessions/{id}[/test|/calls] requests.
+func (s *Server) sessionRouter(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Parse: /api/sessions/{id}[/suffix]
+	path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	parts := strings.SplitN(path, "/", 2)
+	id := parts[0]
+	suffix := ""
+	if len(parts) == 2 {
+		suffix = parts[1]
+	}
+
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch suffix {
+	case "":
+		switch r.Method {
+		case http.MethodGet:
+			s.getSessionHandler(w, r, id)
+		case http.MethodPatch:
+			s.updateSessionHandler(w, r, id)
+		default:
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		}
+	case "test":
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		s.testSessionHandler(w, r, id)
+	case "calls":
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		s.listCallsHandler(w, r, id)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) getSessionHandler(w http.ResponseWriter, r *http.Request, id string) {
+	sess, err := s.sessionStore.Get(id)
+	if err != nil {
+		s.logger.Error("failed to get session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if sess == nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(sess)
+}
+
+func (s *Server) updateSessionHandler(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		CallbackURL string `json:"callback_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := validateCallbackURL(body.CallbackURL); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.sessionStore.UpdateCallbackURL(id, body.CallbackURL); err != nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+
+	sess, err := s.sessionStore.Get(id)
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(sess)
+}
+
+func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id string) {
+	// Rate limit.
+	if s.rateLimiter != nil && !s.rateLimiter.Allow(id) {
+		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
+	sess, err := s.sessionStore.GetWithKey(id)
+	if err != nil {
+		s.logger.Error("failed to get session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if sess == nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if sess.CallbackURL == "" {
+		http.Error(w, `{"error":"callback_url not set, use PATCH /api/sessions/{id} first"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Build mTLS client with session certs and SSRF-safe dialer.
+	httpClient, err := client.NewHTTPClient(client.Config{
+		ClientCertPEM: []byte(sess.CertPEM),
+		ClientKeyPEM:  []byte(sess.KeyPEM),
+		Insecure:      true, // We don't validate the user's server cert.
+		Timeout:       10 * time.Second,
+	})
+	if err != nil {
+		s.logger.Error("failed to build HTTP client for session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Attach SSRF-safe dialer to the transport.
+	transport := httpClient.Transport.(*http.Transport)
+	dialer := &safedial.SafeDialer{}
+	transport.DialContext = dialer.DialContext
+
+	// Make the outbound call.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	probeResult := client.Probe(ctx, httpClient, sess.CallbackURL, nil, nil)
+
+	// Store the call.
+	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
+	if err != nil {
+		s.logger.Error("failed to store call", "error", err)
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"call_id":      callID,
+		"callback_url": sess.CallbackURL,
+		"status_code":  probeResult.StatusCode,
+		"duration_ms":  probeResult.DurationMS,
+		"error":        probeResult.Error,
+		"inspection":   probeResult.Inspection,
+	})
+}
+
+func (s *Server) listCallsHandler(w http.ResponseWriter, r *http.Request, id string) {
+	limit := 20
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	calls, total, err := s.sessionStore.ListCalls(id, limit, offset)
+	if err != nil {
+		s.logger.Error("failed to list calls", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if calls == nil {
+		calls = []session.CallRecord{}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"calls": calls,
+		"total": total,
+	})
+}
+
+// validateCallbackURL checks that a callback URL is safe to call.
+func validateCallbackURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("callback_url is required")
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if u.Scheme != "https" {
+		return fmt.Errorf("callback_url must use https")
+	}
+
+	if u.Hostname() == "" {
+		return fmt.Errorf("callback_url must have a hostname")
+	}
+
+	return nil
 }

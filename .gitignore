@@ -30,6 +30,11 @@ mtls-sandbox
 # Generated certs
 certs/
 
+# SQLite databases
+sessions.db
+sessions.db-wal
+sessions.db-shm
+
 # env file
 .env
 
