@@ -12,8 +12,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"time"
 	"syscall"
+	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/config"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ca"
