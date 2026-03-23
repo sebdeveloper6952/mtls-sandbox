@@ -5,13 +5,18 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"embed"
 	"fmt"
 	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ca"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/client"
+	migrate "github.com/rubenv/sql-migrate"
 	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations
+var migrationsFS embed.FS
 
 // Session represents a testing session with its issued client cert.
 type Session struct {
@@ -31,17 +36,28 @@ type CallRecord struct {
 	SessionID   string             `json:"session_id"`
 	CreatedAt   string             `json:"created_at"`
 	CallbackURL string             `json:"callback_url"`
+	TestMode    string             `json:"test_mode"`
 	StatusCode  int                `json:"status_code"`
 	DurationMS  int64              `json:"duration_ms"`
 	Error       string             `json:"error,omitempty"`
 	ProbeResult *client.ProbeResult `json:"probe_result,omitempty"`
 }
 
+// TestMode controls which credentials the outbound test call uses.
+type TestMode string
+
+const (
+	TestModeNormal  TestMode = "normal"   // session's own client cert (should pass)
+	TestModeNoCert  TestMode = "no_cert"  // no client cert at all (should fail)
+	TestModeWrongCA TestMode = "wrong_ca" // client cert from a different CA (should fail)
+)
+
 // Store manages sessions and call history in SQLite.
 type Store struct {
-	db     *sql.DB
-	ca     *ca.CA
-	maxAge time.Duration
+	db      *sql.DB
+	ca      *ca.CA
+	wrongCA *ca.CA // separate CA for negative tests
+	maxAge  time.Duration
 }
 
 // NewStore opens (or creates) a SQLite database and runs migrations.
@@ -62,40 +78,27 @@ func NewStore(dbPath string, authority *ca.CA, maxAge time.Duration) (*Store, er
 		}
 	}
 
-	if err := migrate(db); err != nil {
+	if err := runMigrations(db); err != nil {
 		db.Close()
 		return nil, err
 	}
 
-	return &Store{db: db, ca: authority, maxAge: maxAge}, nil
+	// Generate a separate CA for "wrong CA" negative tests.
+	wrongCA, err := ca.NewCA("ecdsa-p256")
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("generating wrong CA: %w", err)
+	}
+
+	return &Store{db: db, ca: authority, wrongCA: wrongCA, maxAge: maxAge}, nil
 }
 
-func migrate(db *sql.DB) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS sessions (
-		id          TEXT PRIMARY KEY,
-		created_at  TEXT NOT NULL,
-		expires_at  TEXT NOT NULL,
-		callback_url TEXT NOT NULL DEFAULT '',
-		cert_pem    BLOB NOT NULL,
-		key_pem     BLOB NOT NULL,
-		cert_cn     TEXT NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS call_history (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-		created_at  TEXT NOT NULL,
-		callback_url TEXT NOT NULL,
-		status_code INTEGER,
-		duration_ms INTEGER NOT NULL,
-		error       TEXT,
-		probe_result TEXT
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_call_history_session ON call_history(session_id, created_at DESC);
-	`
-	_, err := db.Exec(schema)
+func runMigrations(db *sql.DB) error {
+	src := &migrate.EmbedFileSystemMigrationSource{
+		FileSystem: migrationsFS,
+		Root:       "migrations",
+	}
+	_, err := migrate.Exec(db, "sqlite3", src, migrate.Up)
 	if err != nil {
 		return fmt.Errorf("running migrations: %w", err)
 	}
@@ -198,7 +201,7 @@ func (s *Store) UpdateCallbackURL(id, url string) error {
 }
 
 // AddCall records a test call result and returns the call ID.
-func (s *Store) AddCall(sessionID string, callbackURL string, statusCode int, durationMS int64, callError string, probeResult *client.ProbeResult) (int64, error) {
+func (s *Store) AddCall(sessionID string, callbackURL string, testMode TestMode, statusCode int, durationMS int64, callError string, probeResult *client.ProbeResult) (int64, error) {
 	var probeJSON []byte
 	if probeResult != nil {
 		var err error
@@ -209,8 +212,8 @@ func (s *Store) AddCall(sessionID string, callbackURL string, statusCode int, du
 	}
 
 	result, err := s.db.Exec(
-		`INSERT INTO call_history (session_id, created_at, callback_url, status_code, duration_ms, error, probe_result) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, time.Now().UTC().Format(time.RFC3339), callbackURL, statusCode, durationMS, nullString(callError), probeJSON,
+		`INSERT INTO call_history (session_id, created_at, callback_url, test_mode, status_code, duration_ms, error, probe_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, time.Now().UTC().Format(time.RFC3339), callbackURL, string(testMode), statusCode, durationMS, nullString(callError), probeJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting call record: %w", err)
@@ -228,7 +231,7 @@ func (s *Store) ListCalls(sessionID string, limit, offset int) ([]CallRecord, in
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, session_id, created_at, callback_url, status_code, duration_ms, error, probe_result FROM call_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id, session_id, created_at, callback_url, test_mode, status_code, duration_ms, error, probe_result FROM call_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		sessionID, limit, offset,
 	)
 	if err != nil {
@@ -241,7 +244,7 @@ func (s *Store) ListCalls(sessionID string, limit, offset int) ([]CallRecord, in
 		var c CallRecord
 		var callErr sql.NullString
 		var probeJSON sql.NullString
-		err := rows.Scan(&c.ID, &c.SessionID, &c.CreatedAt, &c.CallbackURL, &c.StatusCode, &c.DurationMS, &callErr, &probeJSON)
+		err := rows.Scan(&c.ID, &c.SessionID, &c.CreatedAt, &c.CallbackURL, &c.TestMode, &c.StatusCode, &c.DurationMS, &callErr, &probeJSON)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scanning call: %w", err)
 		}
@@ -268,6 +271,11 @@ func (s *Store) CleanExpired() (int64, error) {
 		return 0, fmt.Errorf("cleaning expired sessions: %w", err)
 	}
 	return result.RowsAffected()
+}
+
+// WrongCACert returns client cert PEM and key PEM issued by the wrong CA.
+func (s *Store) WrongCACert() (certPEM, keyPEM []byte, err error) {
+	return s.wrongCA.IssueCert("client", "wrong-ca-client", nil)
 }
 
 // Close closes the database connection.

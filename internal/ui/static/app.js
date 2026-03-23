@@ -141,7 +141,15 @@
         '<section class="panel">' +
           '<h2>Step 3: Test</h2>' +
           '<div class="panel-body">' +
-            '<button class="btn btn-primary btn-large" id="btn-test">Run mTLS Test</button>' +
+            '<div class="test-buttons">' +
+              '<button class="btn btn-primary btn-large" id="btn-test" data-mode="normal">Run mTLS Test</button>' +
+              '<button class="btn btn-danger" id="btn-test-nocert" data-mode="no_cert">Test Without Cert</button>' +
+              '<button class="btn btn-danger" id="btn-test-wrongca" data-mode="wrong_ca">Test With Wrong CA</button>' +
+            '</div>' +
+            '<p class="help-text test-help">' +
+              '<strong>Run mTLS Test</strong> sends a request with the correct client cert (should pass). ' +
+              '<strong>Without Cert</strong> and <strong>Wrong CA</strong> are negative tests &mdash; your server should reject these.' +
+            '</p>' +
             '<div id="test-feedback" class="feedback"></div>' +
           '</div>' +
         '</section>' +
@@ -200,37 +208,45 @@
         });
     });
 
-    // Test
-    document.getElementById('btn-test').addEventListener('click', function () {
-      var btn = this;
-      var feedback = document.getElementById('test-feedback');
-      btn.disabled = true;
-      btn.textContent = 'Testing...';
-      feedback.textContent = '';
+    // Test buttons
+    ['btn-test', 'btn-test-nocert', 'btn-test-wrongca'].forEach(function (btnId) {
+      document.getElementById(btnId).addEventListener('click', function () {
+        var btn = this;
+        var origText = btn.textContent;
+        var mode = btn.getAttribute('data-mode');
+        var feedback = document.getElementById('test-feedback');
+        btn.disabled = true;
+        btn.textContent = 'Testing...';
+        feedback.textContent = '';
 
-      fetch('/api/sessions/' + sess.id + '/test', { method: 'POST' })
-        .then(function (r) {
-          if (!r.ok) return r.json().then(function (d) { throw new Error(d.error); });
-          return r.json();
+        fetch('/api/sessions/' + sess.id + '/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ test_mode: mode })
         })
-        .then(function (result) {
-          btn.disabled = false;
-          btn.textContent = 'Run mTLS Test';
-          if (!result.error) {
-            feedback.className = 'feedback feedback-ok';
-            feedback.textContent = 'OK! Status ' + result.status_code + ' in ' + result.duration_ms + 'ms';
-          } else {
+          .then(function (r) {
+            if (!r.ok) return r.json().then(function (d) { throw new Error(d.error); });
+            return r.json();
+          })
+          .then(function (result) {
+            btn.disabled = false;
+            btn.textContent = origText;
+            if (!result.error) {
+              feedback.className = 'feedback feedback-ok';
+              feedback.textContent = '[' + mode + '] OK! Status ' + result.status_code + ' in ' + result.duration_ms + 'ms';
+            } else {
+              feedback.className = 'feedback feedback-err';
+              feedback.textContent = '[' + mode + '] ' + result.error;
+            }
+            fetchCalls(sess.id);
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            btn.textContent = origText;
             feedback.className = 'feedback feedback-err';
-            feedback.textContent = result.error;
-          }
-          fetchCalls(sess.id);
-        })
-        .catch(function (err) {
-          btn.disabled = false;
-          btn.textContent = 'Run mTLS Test';
-          feedback.className = 'feedback feedback-err';
-          feedback.textContent = err.message || 'Test failed';
-        });
+            feedback.textContent = err.message || 'Test failed';
+          });
+      });
     });
 
     // Load calls
@@ -255,16 +271,18 @@
       return;
     }
 
-    var html = '<table><thead><tr><th>Time</th><th>URL</th><th>Status</th><th>Result</th><th>Latency</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>Time</th><th>Mode</th><th>Status</th><th>Result</th><th>Latency</th></tr></thead><tbody>';
     for (var i = 0; i < calls.length; i++) {
       var c = calls[i];
       var ok = c.probe_result && c.probe_result.inspection && c.probe_result.inspection.handshake_ok;
       var resultClass = c.error ? 'result-fail' : (ok ? 'result-ok' : 'result-fail');
       var resultText = c.error ? 'ERROR' : (ok ? 'PASS' : 'FAIL');
+      var modeLabel = c.test_mode || 'normal';
+      var modeClass = modeLabel === 'normal' ? 'mode-normal' : 'mode-negative';
 
       html += '<tr class="clickable call-row" data-idx="' + i + '">' +
         '<td>' + esc(timeAgo(c.created_at)) + '</td>' +
-        '<td class="url-cell">' + esc(c.callback_url) + '</td>' +
+        '<td class="' + modeClass + '">' + esc(modeLabel) + '</td>' +
         '<td>' + (c.status_code || '--') + '</td>' +
         '<td class="' + resultClass + '">' + resultText + '</td>' +
         '<td>' + c.duration_ms + 'ms</td>' +

@@ -141,7 +141,7 @@ func TestAddCallAndList(t *testing.T) {
 		DurationMS: 42,
 		Inspection: &inspector.InspectionReport{HandshakeOK: true},
 	}
-	callID, err := s.AddCall(sess.ID, "https://example.com", 200, 42, "", probe)
+	callID, err := s.AddCall(sess.ID, "https://example.com", TestModeNormal, 200, 42, "", probe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestAddCallAndList(t *testing.T) {
 	}
 
 	// Add a failed call.
-	_, err = s.AddCall(sess.ID, "https://fail.example.com", 0, 100, "connection refused", nil)
+	_, err = s.AddCall(sess.ID, "https://fail.example.com", TestModeWrongCA, 0, 100, "connection refused", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

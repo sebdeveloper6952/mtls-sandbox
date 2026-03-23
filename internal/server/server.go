@@ -432,13 +432,42 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Build mTLS client with session certs and SSRF-safe dialer.
-	httpClient, err := client.NewHTTPClient(client.Config{
-		ClientCertPEM: []byte(sess.CertPEM),
-		ClientKeyPEM:  []byte(sess.KeyPEM),
-		Insecure:      true, // We don't validate the user's server cert.
-		Timeout:       10 * time.Second,
-	})
+	// Parse test mode from request body (optional).
+	mode := session.TestModeNormal
+	var body struct {
+		TestMode string `json:"test_mode"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&body)
+	}
+	switch session.TestMode(body.TestMode) {
+	case session.TestModeNoCert, session.TestModeWrongCA:
+		mode = session.TestMode(body.TestMode)
+	}
+
+	// Build HTTP client based on test mode.
+	clientCfg := client.Config{
+		Insecure: true, // We don't validate the user's server cert.
+		Timeout:  10 * time.Second,
+	}
+	switch mode {
+	case session.TestModeNormal:
+		clientCfg.ClientCertPEM = []byte(sess.CertPEM)
+		clientCfg.ClientKeyPEM = []byte(sess.KeyPEM)
+	case session.TestModeNoCert:
+		// No client cert — server should reject.
+	case session.TestModeWrongCA:
+		wrongCert, wrongKey, err := s.sessionStore.WrongCACert()
+		if err != nil {
+			s.logger.Error("failed to get wrong CA cert", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		clientCfg.ClientCertPEM = wrongCert
+		clientCfg.ClientKeyPEM = wrongKey
+	}
+
+	httpClient, err := client.NewHTTPClient(clientCfg)
 	if err != nil {
 		s.logger.Error("failed to build HTTP client for session", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -457,13 +486,14 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 	probeResult := client.Probe(ctx, httpClient, sess.CallbackURL, nil, nil)
 
 	// Store the call.
-	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
+	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, mode, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
 	if err != nil {
 		s.logger.Error("failed to store call", "error", err)
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"call_id":      callID,
+		"test_mode":    mode,
 		"callback_url": sess.CallbackURL,
 		"status_code":  probeResult.StatusCode,
 		"duration_ms":  probeResult.DurationMS,
