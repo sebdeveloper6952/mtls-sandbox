@@ -377,6 +377,11 @@
       .then(function (r) { return r.json(); })
       .then(function (data) {
         startedAt = new Date(data.started_at);
+        var badge = document.getElementById('mode-badge');
+        if (badge) {
+          badge.textContent = data.mode;
+          badge.className = 'badge badge-' + data.mode;
+        }
       })
       .catch(noop);
   }
