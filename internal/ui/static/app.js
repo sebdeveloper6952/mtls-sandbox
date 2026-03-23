@@ -446,18 +446,20 @@
     if (!container) return;
     var p = status.persist_path || './certs';
     var port = status.mtls_port || 8443;
+    var host = window.location.hostname;
+    var base = 'https://' + host + ':' + port;
     var commands = [
       {
         label: 'Test mTLS handshake (strict mode)',
-        cmd: 'curl --cert ' + p + '/client.crt --key ' + p + '/client.key \\\n  --cacert ' + p + '/ca.crt \\\n  https://localhost:' + port + '/'
+        cmd: 'curl --cert ' + p + '/client.crt --key ' + p + '/client.key \\\n  --cacert ' + p + '/ca.crt \\\n  ' + base + '/'
       },
       {
         label: 'Without client cert (should fail in strict mode)',
-        cmd: 'curl --cacert ' + p + '/ca.crt https://localhost:' + port + '/'
+        cmd: 'curl --cacert ' + p + '/ca.crt ' + base + '/'
       },
       {
         label: 'Debug endpoint',
-        cmd: 'curl --cert ' + p + '/client.crt --key ' + p + '/client.key \\\n  --cacert ' + p + '/ca.crt \\\n  https://localhost:' + port + '/debug'
+        cmd: 'curl --cert ' + p + '/client.crt --key ' + p + '/client.key \\\n  --cacert ' + p + '/ca.crt \\\n  ' + base + '/debug'
       }
     ];
 
