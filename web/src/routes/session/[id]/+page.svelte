@@ -35,12 +35,8 @@
 	const curlCommand = $derived.by(() => {
 		if (typeof window === 'undefined') return '';
 		const host = window.location.hostname;
-		const isLocal = host === 'localhost' || host === '127.0.0.1';
 		const base = `https://${host}:8443`;
-		let cmd = `curl --cert session.crt --key session.key`;
-		if (isLocal) cmd += ` \\\n     --cacert ca.crt`;
-		cmd += ` \\\n     ${base}/`;
-		return cmd;
+		return `curl --cert session.crt --key session.key \\\n     --cacert ca.crt \\\n     ${base}/`;
 	});
 
 	onMount(() => {
@@ -189,9 +185,9 @@
 					<div class="card-body">
 						<h2 class="card-title text-lg">Your Credentials</h2>
 						<p class="text-sm opacity-60">
-							Your app needs both files. Keep the private key secure.
+							Your app needs all three files. Keep the private key secure.
 						</p>
-						<div class="mt-2 grid grid-cols-1 gap-6 md:grid-cols-2">
+						<div class="mt-2 grid grid-cols-1 gap-6 md:grid-cols-3">
 							<PemBlock
 								label="Certificate"
 								content={session.client_cert_pem}
@@ -202,6 +198,11 @@
 								content={session.client_key_pem}
 								filename="session.key"
 							/>
+							<PemBlock
+								label="CA Certificate"
+								content={session.ca_cert_pem}
+								filename="ca.crt"
+							/>
 						</div>
 					</div>
 				</div>
@@ -211,18 +212,10 @@
 					<div class="card-body">
 						<h2 class="card-title text-lg">Try It Now</h2>
 						<p class="text-sm opacity-60">
-							Save the files above as <code>session.crt</code> and
-							<code>session.key</code>, then run:
+							Save the files above as <code>session.crt</code>, <code>session.key</code>,
+							and <code>ca.crt</code>, then run:
 						</p>
 						<CurlCommand command={curlCommand} />
-						{#if typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')}
-							<p class="mt-2 text-sm opacity-60">
-								Running locally: also download
-								<a href="/api/certs/ca" download="ca.crt" class="link">ca.crt</a>
-								to verify our server cert, or replace <code>--cacert ca.crt</code> with
-								<code>-k</code>.
-							</p>
-						{/if}
 					</div>
 				</div>
 
