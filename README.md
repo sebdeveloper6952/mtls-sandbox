@@ -127,7 +127,7 @@ curl -s -X POST https://mtls.apps.sebdev.io/api/sessions/$SESSION_ID/test \
 curl -s "https://mtls.apps.sebdev.io/api/sessions/$SESSION_ID/calls" | jq .
 ```
 
-Or open the session page in the dashboard: `https://mtls.apps.sebdev.io/#/session/<id>`
+Or open the session page in the dashboard: `https://mtls.apps.sebdev.io/session/<id>`
 
 ### Limits
 
@@ -475,6 +475,42 @@ Switch to human-readable text logging with:
 MTLS_LOG_FORMAT=text mtls-sandbox
 ```
 
+## Observability
+
+The server is instrumented with [OpenTelemetry](https://opentelemetry.io/). Tracing and metrics are always-on in the code but export to a no-op backend by default, so there is zero overhead unless you configure an OTLP endpoint.
+
+To enable, set the standard `OTEL_*` environment variables:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 mtls-sandbox
+```
+
+| Variable | Description | Default |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint (enables telemetry when set) | (unset — no-op) |
+| `MTLS_ENVIRONMENT` | Value for `deployment.environment.name` resource attribute | `development` |
+
+### Traces
+
+Automatic HTTP spans via `otelhttp` on both the mTLS (`:8443`) and API (`:8080`) servers, plus manual spans:
+
+- `session.create` — session creation with `session.id` attribute
+- `session.test` — outbound test call with `session.id` and `test.mode`
+- `outbound.probe` — the actual HTTP call to the callback URL
+- `tls.inspect` — TLS inspection with `handshake.ok` and `failure_code`
+
+### Metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `mtls.inbound.requests` | Counter | Total inbound mTLS requests (by status, handshake result) |
+| `mtls.outbound.probes` | Counter | Total outbound session test probes (by test mode, status) |
+| `mtls.sessions.created` | Counter | Total sessions created |
+| `mtls.handshake.results` | Counter | TLS handshake pass/fail counts |
+| `mtls.inbound.latency_ms` | Histogram | Inbound request latency |
+| `mtls.outbound.latency_ms` | Histogram | Outbound probe latency |
+| `mtls.sessions.active` | UpDownCounter | Number of active sessions |
+
 ## Architecture
 
 ```
@@ -507,9 +543,20 @@ mtls-sandbox/
 │   │   └── migrations/      # sql-migrate SQL migration files
 │   ├── store/
 │   │   └── store.go         # In-memory ring buffer for inbound request log
+│   ├── telemetry/
+│   │   ├── telemetry.go     # OTel bootstrap (trace + metric providers)
+│   │   └── metrics.go       # Custom metric instruments
 │   └── ui/
-│       ├── dashboard.go     # go:embed handler
-│       └── static/          # Dashboard SPA (HTML/CSS/JS)
+│       ├── dashboard.go     # go:embed SPA handler with client-side routing fallback
+│       └── static/          # SvelteKit build output (generated — do not edit)
+├── web/                     # SvelteKit 2 + Tailwind CSS 4 + DaisyUI 5 dashboard
+│   ├── src/
+│   │   ├── routes/          # SPA pages: landing, session, monitor
+│   │   └── lib/             # API client, types, components (PemBlock, CurlCommand, etc.)
+│   ├── svelte.config.js
+│   └── vite.config.ts
+├── Dockerfile               # Multi-stage: Node.js → SvelteKit, Go → embed, distroless runtime
+├── Makefile                 # build-web, build, clean targets
 ├── go.mod
 └── go.sum
 ```
@@ -518,16 +565,23 @@ The mTLS server and health server run on separate ports. The health endpoint is 
 
 All three server modes use `tls.RequestClientCert` at the TLS layer, which means the HTTP handler always runs. Certificate verification is performed in the handler by the inspector package, allowing every connection to receive structured diagnostic feedback.
 
+The dashboard is a SvelteKit SPA built with `adapter-static` and embedded into the Go binary via `go:embed`. The Go server includes a fallback handler that serves `index.html` for any unknown path, enabling client-side routing.
+
 ## Development
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
+- Node.js 22+ and pnpm (for the dashboard)
 
 ### Run from source
 
 ```bash
+# Go server only (uses previously built/embedded UI, or no UI if not built yet)
 go run ./cmd/mtls-sandbox
+
+# Dashboard dev server (hot reload, proxies /api to Go backend)
+cd web && pnpm install && pnpm dev
 ```
 
 ### Run tests
@@ -545,8 +599,15 @@ Tests cover:
 ### Build
 
 ```bash
+# Full build: SvelteKit UI + Go binary
+make build
+
+# Or step by step:
+make build-web              # Build SvelteKit → internal/ui/static/
 go build -o mtls-sandbox ./cmd/mtls-sandbox
 ```
+
+The `make build-web` step compiles the SvelteKit app with `adapter-static` and copies the output into `internal/ui/static/`, which is then embedded into the Go binary at compile time via `go:embed`.
 
 ## License
 
