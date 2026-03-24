@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/inspector"
@@ -80,6 +81,14 @@ func (s *Server) recordingMiddleware(next http.Handler) http.Handler {
 		}
 
 		s.store.Append(entry)
+
+		// Associate with a session if the client cert CN is "session-<id>".
+		if s.sessionStore != nil && strings.HasPrefix(entry.CertCN, "session-") {
+			sessionID := strings.TrimPrefix(entry.CertCN, "session-")
+			if err := s.sessionStore.AddInboundRequest(sessionID, entry.Method, entry.Path, entry.Status, entry.LatencyMS, entry.Report); err != nil {
+				s.logger.Error("failed to record inbound request for session", "session_id", sessionID, "error", err)
+			}
+		}
 	})
 }
 

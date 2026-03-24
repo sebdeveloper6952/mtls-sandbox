@@ -40,15 +40,33 @@
       '<div class="page landing">' +
         '<div class="hero">' +
           '<h2>Test Your mTLS Configuration</h2>' +
-          '<p>Create a session to get a unique client certificate. Configure your server to trust our CA, ' +
-             'then let us call your server to verify the mTLS handshake works.</p>' +
-          '<button class="btn btn-primary" id="btn-create-session">Create Session</button>' +
+          '<p>Create a session to get a unique client certificate. Use it to validate your outgoing mTLS setup, or let us call your server to validate your incoming mTLS enforcement.</p>' +
+          '<button class="btn btn-primary btn-large" id="btn-create-session">Create Session</button>' +
         '</div>' +
-        '<div class="steps">' +
-          '<div class="step"><span class="step-num">1</span><div><strong>Create a session</strong><p>Get a unique client certificate and our CA cert.</p></div></div>' +
-          '<div class="step"><span class="step-num">2</span><div><strong>Configure your server</strong><p>Add our CA certificate to your server\'s trusted client CAs.</p></div></div>' +
-          '<div class="step"><span class="step-num">3</span><div><strong>Set your callback URL</strong><p>Tell us the HTTPS endpoint to test.</p></div></div>' +
-          '<div class="step"><span class="step-num">4</span><div><strong>Run the test</strong><p>We\'ll call your server with our client cert and show the results.</p></div></div>' +
+        '<div class="use-cases">' +
+          '<div class="use-case">' +
+            '<div class="use-case-icon">→</div>' +
+            '<h3>Client Auth</h3>' +
+            '<p class="use-case-desc">Your app connects to an mTLS server. Verify it presents client certs correctly.</p>' +
+            '<ol class="use-case-steps">' +
+              '<li>Download your session cert &amp; key</li>' +
+              '<li>Configure your HTTP client to use them</li>' +
+              '<li>Point your app at our mTLS endpoint</li>' +
+              '<li>Watch the handshake result live</li>' +
+            '</ol>' +
+          '</div>' +
+          '<div class="use-case-divider"></div>' +
+          '<div class="use-case">' +
+            '<div class="use-case-icon">←</div>' +
+            '<h3>Server Auth</h3>' +
+            '<p class="use-case-desc">Your server receives connections. Verify it correctly demands and verifies client certs.</p>' +
+            '<ol class="use-case-steps">' +
+              '<li>Trust our CA on your server</li>' +
+              '<li>Set your server\'s HTTPS URL</li>' +
+              '<li>We call you with our client cert</li>' +
+              '<li>See whether the handshake passed or failed</li>' +
+            '</ol>' +
+          '</div>' +
         '</div>' +
       '</div>';
 
@@ -58,9 +76,7 @@
       btn.textContent = 'Creating...';
       fetch('/api/sessions', { method: 'POST' })
         .then(function (r) { return r.json(); })
-        .then(function (sess) {
-          location.hash = '#/session/' + sess.id;
-        })
+        .then(function (sess) { location.hash = '#/session/' + sess.id; })
         .catch(function () {
           btn.disabled = false;
           btn.textContent = 'Create Session';
@@ -89,100 +105,169 @@
   }
 
   function renderSessionContent(app, sess) {
+    var host = window.location.hostname;
+    var isLocal = (host === 'localhost' || host === '127.0.0.1');
+    var mtlsBase = 'https://' + host + ':8443';
+    var curlCmd = 'curl --cert session.crt --key session.key' +
+      (isLocal ? ' \\\n     --cacert ca.crt' : '') +
+      ' \\\n     ' + mtlsBase + '/';
+
     var html =
       '<div class="page session-page">' +
         '<div class="session-header">' +
-          '<h2>Session <code>' + esc(sess.id) + '</code></h2>' +
-          '<div class="session-meta">' +
-            '<span>CN: <strong>' + esc(sess.cert_cn) + '</strong></span>' +
-            '<span>Expires: ' + esc(new Date(sess.expires_at).toLocaleString()) + '</span>' +
+          '<div>' +
+            '<h2>Session <code>' + esc(sess.id) + '</code></h2>' +
+            '<div class="session-meta">' +
+              '<span>CN: <strong>' + esc(sess.cert_cn) + '</strong></span>' +
+              '<span>Expires: ' + esc(new Date(sess.expires_at).toLocaleString()) + '</span>' +
+            '</div>' +
           '</div>' +
         '</div>' +
 
-        // CA cert download
-        '<section class="panel">' +
-          '<h2>Step 1: Trust Our CA</h2>' +
-          '<div class="panel-body">' +
-            '<p class="help-text">Add this CA certificate to your server\'s trusted client CAs.</p>' +
-            '<div class="pem-block">' +
-              '<pre id="ca-pem">' + esc(sess.ca_cert_pem || '') + '</pre>' +
-              '<button class="btn btn-copy" id="btn-copy-ca">Copy CA Cert</button>' +
-            '</div>' +
-          '</div>' +
-        '</section>' +
+        '<div class="main-tabs">' +
+          '<button class="main-tab-btn main-tab-active" id="main-tab-client">' +
+            '<span class="tab-arrow">→</span> Client Auth' +
+            ' <span id="inbound-count" class="count-badge">0</span>' +
+          '</button>' +
+          '<button class="main-tab-btn" id="main-tab-server">' +
+            '<span class="tab-arrow">←</span> Server Auth' +
+            ' <span id="call-count" class="count-badge">0</span>' +
+          '</button>' +
+        '</div>' +
 
-        // Client cert (for reference)
-        (sess.client_cert_pem ?
+        // ── Client Auth panel ──────────────────────────────────────
+        '<div id="main-panel-client">' +
+          '<p class="tab-intro">Test that your app correctly presents a client certificate when connecting to an mTLS server. ' +
+            'Download your credentials, configure your HTTP client, point it at our endpoint, and watch the handshake result appear below.</p>' +
+
           '<section class="panel">' +
-            '<h2 class="panel-header" data-toggle="client-cert-body">Client Certificate (Reference)</h2>' +
-            '<div id="client-cert-body" class="panel-body collapsed">' +
-              '<p class="help-text">This is the client certificate we\'ll present to your server. You don\'t need to download this &mdash; we use it automatically.</p>' +
-              '<div class="pem-block">' +
-                '<pre>' + esc(sess.client_cert_pem) + '</pre>' +
-                '<button class="btn btn-copy" data-copy="client-cert">Copy Cert</button>' +
+            '<h2>Your Credentials</h2>' +
+            '<p class="help-text">Your app needs both files. Keep the private key secure — it never leaves this session.</p>' +
+            '<div class="cred-grid">' +
+              '<div class="cred-block">' +
+                '<div class="cred-label">Certificate</div>' +
+                '<pre class="pem-pre">' + esc(sess.client_cert_pem || '') + '</pre>' +
+                '<div class="cred-actions">' +
+                  '<button class="btn btn-copy" id="btn-copy-cert">Copy</button>' +
+                  '<button class="btn" id="btn-dl-cert">Download .crt</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="cred-block">' +
+                '<div class="cred-label">Private Key</div>' +
+                '<pre class="pem-pre pem-key">' + esc(sess.client_key_pem || '') + '</pre>' +
+                '<div class="cred-actions">' +
+                  '<button class="btn btn-copy" id="btn-copy-key">Copy</button>' +
+                  '<button class="btn" id="btn-dl-key">Download .key</button>' +
+                '</div>' +
               '</div>' +
             '</div>' +
-          '</section>' : '') +
+          '</section>' +
 
-        // Callback URL
-        '<section class="panel">' +
-          '<h2>Step 2: Set Callback URL</h2>' +
-          '<div class="panel-body">' +
-            '<p class="help-text">Enter the HTTPS URL of your server that we should call with our client certificate.</p>' +
+          '<section class="panel">' +
+            '<h2>Try It Now</h2>' +
+            '<p class="help-text">Save the files above as <code>session.crt</code> and <code>session.key</code>, then run:</p>' +
+            '<div class="curl-block">' +
+              '<pre class="curl-cmd">' + esc(curlCmd) + '</pre>' +
+              '<button class="btn btn-copy" id="btn-copy-curl">Copy</button>' +
+            '</div>' +
+            (isLocal
+              ? '<p class="help-text">Running locally: also download <a href="/api/certs/ca" download="ca.crt">ca.crt</a> to verify our server cert, or replace <code>--cacert ca.crt</code> with <code>-k</code>.</p>'
+              : '') +
+          '</section>' +
+
+          '<section class="panel">' +
+            '<h2>Request Log <span id="inbound-log-count" class="count-badge">0</span></h2>' +
+            '<div id="inbound-container"></div>' +
+          '</section>' +
+        '</div>' +
+
+        // ── Server Auth panel ──────────────────────────────────────
+        '<div id="main-panel-server" class="hidden">' +
+          '<p class="tab-intro">Test that your server correctly demands and verifies client certificates from callers. ' +
+            'Follow the steps below — we\'ll call your server using this session\'s client cert and show you exactly what happened.</p>' +
+
+          '<section class="panel">' +
+            '<h2>Step 1 — Trust Our CA</h2>' +
+            '<p class="help-text">Add this certificate to your server\'s trusted <em>client</em> CA list (not the regular server trust store).</p>' +
+            '<div class="pem-block">' +
+              '<pre>' + esc(sess.ca_cert_pem || '') + '</pre>' +
+              '<div class="pem-actions">' +
+                '<button class="btn btn-copy" id="btn-copy-ca">Copy</button>' +
+                '<button class="btn" id="btn-dl-ca">Download .crt</button>' +
+              '</div>' +
+            '</div>' +
+            '<details class="code-snippets">' +
+              '<summary>Configuration examples</summary>' +
+              '<div class="snippet-grid">' +
+                '<div class="snippet"><div class="snippet-label">nginx</div>' +
+                  '<pre>ssl_client_certificate /etc/nginx/sandbox-ca.crt;\nssl_verify_client on;</pre>' +
+                '</div>' +
+                '<div class="snippet"><div class="snippet-label">Go</div>' +
+                  '<pre>caPool := x509.NewCertPool()\ncaPool.AppendCertsFromPEM(caPEM)\ntlsCfg := &tls.Config{\n    ClientCAs:  caPool,\n    ClientAuth: tls.RequireAndVerifyClientCert,\n}</pre>' +
+                '</div>' +
+              '</div>' +
+            '</details>' +
+          '</section>' +
+
+          '<section class="panel">' +
+            '<h2>Step 2 — Your Server URL</h2>' +
+            '<p class="help-text">The HTTPS URL we\'ll call. Must be publicly reachable — no private IPs.</p>' +
             '<div class="url-form">' +
-              '<input type="url" id="callback-url" placeholder="https://your-server.com:8443/health" value="' + attr(sess.callback_url || '') + '">' +
+              '<input type="url" id="callback-url" placeholder="https://your-server.example.com" value="' + attr(sess.callback_url || '') + '">' +
               '<button class="btn btn-primary" id="btn-save-url">Save</button>' +
             '</div>' +
             '<div id="url-feedback" class="feedback"></div>' +
-          '</div>' +
-        '</section>' +
+          '</section>' +
 
-        // Test
-        '<section class="panel">' +
-          '<h2>Step 3: Test</h2>' +
-          '<div class="panel-body">' +
-            '<div class="test-buttons">' +
-              '<button class="btn btn-primary btn-large" id="btn-test" data-mode="normal">Run mTLS Test</button>' +
-              '<button class="btn btn-danger" id="btn-test-nocert" data-mode="no_cert">Test Without Cert</button>' +
-              '<button class="btn btn-danger" id="btn-test-wrongca" data-mode="wrong_ca">Test With Wrong CA</button>' +
+          '<section class="panel">' +
+            '<h2>Step 3 — Run Tests</h2>' +
+            '<div class="test-grid">' +
+              '<div class="test-option">' +
+                '<button class="btn btn-primary" id="btn-test" data-mode="normal">Run mTLS Test</button>' +
+                '<p class="test-desc">Sends our session cert.<br><strong class="result-ok">Should pass.</strong></p>' +
+              '</div>' +
+              '<div class="test-option">' +
+                '<button class="btn btn-danger" id="btn-test-nocert" data-mode="no_cert">No Client Cert</button>' +
+                '<p class="test-desc">Sends no cert at all.<br><strong class="result-fail">Should be rejected.</strong></p>' +
+              '</div>' +
+              '<div class="test-option">' +
+                '<button class="btn btn-danger" id="btn-test-wrongca" data-mode="wrong_ca">Wrong CA</button>' +
+                '<p class="test-desc">Cert from untrusted CA.<br><strong class="result-fail">Should be rejected.</strong></p>' +
+              '</div>' +
             '</div>' +
-            '<p class="help-text test-help">' +
-              '<strong>Run mTLS Test</strong> sends a request with the correct client cert (should pass). ' +
-              '<strong>Without Cert</strong> and <strong>Wrong CA</strong> are negative tests &mdash; your server should reject these.' +
-            '</p>' +
             '<div id="test-feedback" class="feedback"></div>' +
-          '</div>' +
-        '</section>' +
+          '</section>' +
 
-        // Call history
-        '<section class="panel">' +
-          '<h2>Test Results <span id="call-count" class="count-badge">0</span></h2>' +
-          '<div id="calls-container"></div>' +
-        '</section>' +
+          '<section class="panel">' +
+            '<h2>Test Results <span id="call-log-count" class="count-badge">0</span></h2>' +
+            '<div id="calls-container"></div>' +
+          '</section>' +
+        '</div>' +
       '</div>';
 
     app.innerHTML = html;
 
-    // Toggle panels
-    app.querySelectorAll('.panel-header').forEach(function (el) {
-      el.addEventListener('click', function () {
-        var targetId = el.getAttribute('data-toggle');
-        if (targetId) document.getElementById(targetId).classList.toggle('collapsed');
-      });
-    });
-
-    // Copy CA
-    document.getElementById('btn-copy-ca').addEventListener('click', function () {
-      copyText(sess.ca_cert_pem, this);
-    });
-
-    // Copy client cert
-    var copyClientBtn = app.querySelector('[data-copy="client-cert"]');
-    if (copyClientBtn) {
-      copyClientBtn.addEventListener('click', function () {
-        copyText(sess.client_cert_pem, this);
-      });
+    // Main tab switching
+    function showTab(tab) {
+      var isClient = tab === 'client';
+      document.getElementById('main-tab-client').classList.toggle('main-tab-active', isClient);
+      document.getElementById('main-tab-server').classList.toggle('main-tab-active', !isClient);
+      document.getElementById('main-panel-client').classList.toggle('hidden', !isClient);
+      document.getElementById('main-panel-server').classList.toggle('hidden', isClient);
     }
+    document.getElementById('main-tab-client').addEventListener('click', function () { showTab('client'); });
+    document.getElementById('main-tab-server').addEventListener('click', function () { showTab('server'); });
+
+    // Credentials
+    document.getElementById('btn-copy-cert').addEventListener('click', function () { copyText(sess.client_cert_pem, this); });
+    document.getElementById('btn-copy-key').addEventListener('click', function () { copyText(sess.client_key_pem, this); });
+    document.getElementById('btn-dl-cert').addEventListener('click', function () { downloadText('session.crt', sess.client_cert_pem); });
+    document.getElementById('btn-dl-key').addEventListener('click', function () { downloadText('session.key', sess.client_key_pem); });
+    document.getElementById('btn-copy-curl').addEventListener('click', function () { copyText(curlCmd, this); });
+
+    // CA cert
+    document.getElementById('btn-copy-ca').addEventListener('click', function () { copyText(sess.ca_cert_pem, this); });
+    document.getElementById('btn-dl-ca').addEventListener('click', function () { downloadText('sandbox-ca.crt', sess.ca_cert_pem); });
 
     // Save URL
     document.getElementById('btn-save-url').addEventListener('click', function () {
@@ -233,10 +318,10 @@
             btn.textContent = origText;
             if (!result.error) {
               feedback.className = 'feedback feedback-ok';
-              feedback.textContent = '[' + mode + '] OK! Status ' + result.status_code + ' in ' + result.duration_ms + 'ms';
+              feedback.textContent = 'HTTP ' + result.status_code + ' in ' + result.duration_ms + 'ms';
             } else {
               feedback.className = 'feedback feedback-err';
-              feedback.textContent = '[' + mode + '] ' + result.error;
+              feedback.textContent = result.error;
             }
             fetchCalls(sess.id);
           })
@@ -249,16 +334,22 @@
       });
     });
 
-    // Load calls
     fetchCalls(sess.id);
-    pollTimer = setInterval(function () { fetchCalls(sess.id); }, 5000);
+    fetchInbound(sess.id);
+    pollTimer = setInterval(function () {
+      fetchCalls(sess.id);
+      fetchInbound(sess.id);
+    }, 5000);
   }
 
   function fetchCalls(sessionId) {
     fetch('/api/sessions/' + sessionId + '/calls?limit=50')
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        document.getElementById('call-count').textContent = data.total;
+        var badge = document.getElementById('call-count');
+        if (badge) badge.textContent = data.total;
+        var badge2 = document.getElementById('call-log-count');
+        if (badge2) badge2.textContent = data.total;
         renderCalls(data.calls || []);
       })
       .catch(noop);
@@ -331,6 +422,76 @@
         var idx = row.getAttribute('data-idx');
         var detail = document.getElementById('call-detail-' + idx);
         detail.classList.toggle('hidden');
+      });
+    });
+  }
+
+  function fetchInbound(sessionId) {
+    fetch('/api/sessions/' + sessionId + '/inbound?limit=50')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var badge = document.getElementById('inbound-count');
+        if (badge) badge.textContent = data.total;
+        var badge2 = document.getElementById('inbound-log-count');
+        if (badge2) badge2.textContent = data.total;
+        renderInbound(data.requests || []);
+      })
+      .catch(noop);
+  }
+
+  function renderInbound(requests) {
+    var container = document.getElementById('inbound-container');
+    if (requests.length === 0) {
+      container.innerHTML = '<div class="empty-state">No inbound requests yet. Make a request to <code>mtls.apps.sebdev.io:8443</code> using this session\'s client cert.</div>';
+      return;
+    }
+
+    var html = '<table><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Handshake</th><th>Latency</th></tr></thead><tbody>';
+    for (var i = 0; i < requests.length; i++) {
+      var r = requests[i];
+      var okClass = r.handshake_ok ? 'result-ok' : 'result-fail';
+      var okText = r.handshake_ok ? 'PASS' : 'FAIL';
+
+      html += '<tr class="clickable inbound-row" data-idx="' + i + '">' +
+        '<td>' + esc(timeAgo(r.created_at)) + '</td>' +
+        '<td>' + esc(r.method) + '</td>' +
+        '<td>' + esc(r.path) + '</td>' +
+        '<td>' + (r.status_code || '--') + '</td>' +
+        '<td class="' + okClass + '">' + okText + '</td>' +
+        '<td>' + r.latency_ms + 'ms</td>' +
+      '</tr>';
+
+      html += '<tr class="call-detail hidden" id="inbound-detail-' + i + '"><td colspan="6">';
+      html += '<div class="detail-section"><div class="detail-grid">';
+      html += '<span class="label">Handshake</span><span class="' + okClass + '">' + (r.handshake_ok ? 'OK' : 'FAILED') + '</span>';
+      if (r.failure_code) {
+        html += '<span class="label">Failure</span><span class="result-fail">' + esc(r.failure_code) + '</span>';
+        html += '<span class="label">Reason</span><span>' + esc(r.failure_reason) + '</span>';
+      }
+      if (r.report && r.report.presented) {
+        html += '<span class="label">TLS Version</span><span>' + esc(r.report.presented.tls_version || '--') + '</span>';
+        html += '<span class="label">Cipher</span><span>' + esc(r.report.presented.cipher_suite || '--') + '</span>';
+        if (r.report.presented.cert_chain && r.report.presented.cert_chain.length > 0) {
+          html += '<span class="label">Client CN</span><span>' + esc(r.report.presented.cert_chain[0].subject) + '</span>';
+        }
+      }
+      html += '</div>';
+      if (r.report && r.report.hints && r.report.hints.length > 0) {
+        html += '<ul class="hints-list">';
+        for (var h = 0; h < r.report.hints.length; h++) {
+          html += '<li>' + esc(r.report.hints[h]) + '</li>';
+        }
+        html += '</ul>';
+      }
+      html += '</div></td></tr>';
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+
+    container.querySelectorAll('.inbound-row').forEach(function (row) {
+      row.addEventListener('click', function () {
+        var idx = row.getAttribute('data-idx');
+        document.getElementById('inbound-detail-' + idx).classList.toggle('hidden');
       });
     });
   }
@@ -638,6 +799,13 @@
 
   function attr(s) {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  }
+
+  function downloadText(filename, content) {
+    var a = document.createElement('a');
+    a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(content);
+    a.download = filename;
+    a.click();
   }
 
   function copyText(text, btn) {

@@ -3,15 +3,16 @@ package session
 import (
 	"crypto/rand"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"embed"
 	"fmt"
 	"time"
 
+	migrate "github.com/rubenv/sql-migrate"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ca"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/client"
-	migrate "github.com/rubenv/sql-migrate"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/inspector"
 	_ "modernc.org/sqlite"
 )
 
@@ -41,6 +42,21 @@ type CallRecord struct {
 	DurationMS  int64              `json:"duration_ms"`
 	Error       string             `json:"error,omitempty"`
 	ProbeResult *client.ProbeResult `json:"probe_result,omitempty"`
+}
+
+// InboundRequest is a recorded request made TO the sandbox mTLS endpoint.
+type InboundRequest struct {
+	ID            int64                       `json:"id"`
+	SessionID     string                      `json:"session_id"`
+	CreatedAt     string                      `json:"created_at"`
+	Method        string                      `json:"method"`
+	Path          string                      `json:"path"`
+	StatusCode    int                         `json:"status_code"`
+	LatencyMS     int64                       `json:"latency_ms"`
+	HandshakeOK   bool                        `json:"handshake_ok"`
+	FailureCode   string                      `json:"failure_code,omitempty"`
+	FailureReason string                      `json:"failure_reason,omitempty"`
+	Report        *inspector.InspectionReport `json:"report,omitempty"`
 }
 
 // TestMode controls which credentials the outbound test call uses.
@@ -145,13 +161,12 @@ func (s *Store) Create() (*Session, error) {
 // Get retrieves a session by ID. Returns nil if not found or expired.
 func (s *Store) Get(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, created_at, expires_at, callback_url, cert_pem, cert_cn FROM sessions WHERE id = ? AND expires_at > ?`,
+		`SELECT id, created_at, expires_at, callback_url, cert_pem, key_pem, cert_cn FROM sessions WHERE id = ? AND expires_at > ?`,
 		id, time.Now().UTC().Format(time.RFC3339),
 	)
 
 	sess := &Session{}
-	var certPEM string
-	err := row.Scan(&sess.ID, &sess.CreatedAt, &sess.ExpiresAt, &sess.CallbackURL, &certPEM, &sess.CertCN)
+	err := row.Scan(&sess.ID, &sess.CreatedAt, &sess.ExpiresAt, &sess.CallbackURL, &sess.CertPEM, &sess.KeyPEM, &sess.CertCN)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -159,7 +174,6 @@ func (s *Store) Get(id string) (*Session, error) {
 		return nil, fmt.Errorf("querying session: %w", err)
 	}
 
-	sess.CertPEM = certPEM
 	sess.CACertPEM = string(s.ca.CertPEM)
 	return sess, nil
 }
@@ -261,6 +275,83 @@ func (s *Store) ListCalls(sessionID string, limit, offset int) ([]CallRecord, in
 	return calls, total, nil
 }
 
+// AddInboundRequest records a request that arrived at the sandbox mTLS endpoint
+// with a session client cert. Silently ignores unknown session IDs (e.g. expired).
+func (s *Store) AddInboundRequest(sessionID, method, path string, statusCode int, latencyMS int64, report *inspector.InspectionReport) error {
+	var reportJSON []byte
+	var handshakeOK bool
+	var failureCode, failureReason string
+
+	if report != nil {
+		handshakeOK = report.HandshakeOK
+		failureCode = string(report.FailureCode)
+		failureReason = report.FailureReason
+		var err error
+		reportJSON, err = json.Marshal(report)
+		if err != nil {
+			return fmt.Errorf("marshalling report: %w", err)
+		}
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO inbound_requests (session_id, created_at, method, path, status_code, latency_ms, handshake_ok, failure_code, failure_reason, report)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, time.Now().UTC().Format(time.RFC3339), method, path,
+		statusCode, latencyMS, boolToInt(handshakeOK),
+		nullString(failureCode), nullString(failureReason), nullBytes(reportJSON),
+	)
+	if err != nil {
+		// Foreign key violation = session expired/deleted; ignore silently.
+		return nil
+	}
+	return nil
+}
+
+// ListInboundRequests returns inbound requests for a session with pagination.
+func (s *Store) ListInboundRequests(sessionID string, limit, offset int) ([]InboundRequest, int, error) {
+	var total int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM inbound_requests WHERE session_id = ?`, sessionID).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("counting inbound requests: %w", err)
+	}
+
+	rows, err := s.db.Query(
+		`SELECT id, session_id, created_at, method, path, status_code, latency_ms, handshake_ok, failure_code, failure_reason, report
+		 FROM inbound_requests WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		sessionID, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying inbound requests: %w", err)
+	}
+	defer rows.Close()
+
+	var reqs []InboundRequest
+	for rows.Next() {
+		var req InboundRequest
+		var handshakeInt int
+		var failureCode, failureReason sql.NullString
+		var reportJSON sql.NullString
+		err := rows.Scan(&req.ID, &req.SessionID, &req.CreatedAt, &req.Method, &req.Path,
+			&req.StatusCode, &req.LatencyMS, &handshakeInt,
+			&failureCode, &failureReason, &reportJSON)
+		if err != nil {
+			return nil, 0, fmt.Errorf("scanning inbound request: %w", err)
+		}
+		req.HandshakeOK = handshakeInt == 1
+		req.FailureCode = failureCode.String
+		req.FailureReason = failureReason.String
+		if reportJSON.Valid && reportJSON.String != "" {
+			var r inspector.InspectionReport
+			if json.Unmarshal([]byte(reportJSON.String), &r) == nil {
+				req.Report = &r
+			}
+		}
+		reqs = append(reqs, req)
+	}
+
+	return reqs, total, nil
+}
+
 // CleanExpired removes expired sessions and their associated call history.
 func (s *Store) CleanExpired() (int64, error) {
 	result, err := s.db.Exec(
@@ -296,4 +387,18 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func nullBytes(b []byte) sql.NullString {
+	if len(b) == 0 {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: string(b), Valid: true}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

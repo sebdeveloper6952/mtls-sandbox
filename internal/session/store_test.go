@@ -62,8 +62,8 @@ func TestCreateAndGet(t *testing.T) {
 	if got.ID != sess.ID {
 		t.Errorf("expected ID=%s, got %s", sess.ID, got.ID)
 	}
-	if got.KeyPEM != "" {
-		t.Error("Get should not return private key")
+	if got.KeyPEM == "" {
+		t.Error("Get should return private key for the client auth flow")
 	}
 }
 

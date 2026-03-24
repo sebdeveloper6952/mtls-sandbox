@@ -363,6 +363,12 @@ func (s *Server) sessionRouter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.listCallsHandler(w, r, id)
+	case "inbound":
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		s.listInboundHandler(w, r, id)
 	default:
 		http.NotFound(w, r)
 	}
@@ -530,6 +536,37 @@ func (s *Server) listCallsHandler(w http.ResponseWriter, r *http.Request, id str
 	json.NewEncoder(w).Encode(map[string]any{
 		"calls": calls,
 		"total": total,
+	})
+}
+
+func (s *Server) listInboundHandler(w http.ResponseWriter, r *http.Request, id string) {
+	limit := 50
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	reqs, total, err := s.sessionStore.ListInboundRequests(id, limit, offset)
+	if err != nil {
+		s.logger.Error("failed to list inbound requests", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if reqs == nil {
+		reqs = []session.InboundRequest{}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"requests": reqs,
+		"total":    total,
 	})
 }
 
