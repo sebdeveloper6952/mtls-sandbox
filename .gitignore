@@ -35,6 +35,9 @@ sessions.db
 sessions.db-wal
 sessions.db-shm
 
+# Generated UI build output (built from web/)
+internal/ui/static/
+
 # env file
 .env
 
