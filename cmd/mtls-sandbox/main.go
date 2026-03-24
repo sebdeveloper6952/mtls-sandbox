@@ -23,6 +23,7 @@ import (
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/server"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/session"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/telemetry"
 )
 
 func main() {
@@ -67,6 +68,19 @@ func runServe(args []string) {
 	}
 
 	logger := setupLogger(cfg)
+
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT, syscall.SIGTERM,
+	)
+	defer stop()
+
+	otelShutdown, err := telemetry.Init(ctx, "dev")
+	if err != nil {
+		logger.Error("failed to initialize telemetry", "error", err)
+		os.Exit(1)
+	}
+	defer otelShutdown(context.Background())
 
 	authority, serverCertPEM, serverKeyPEM, clientCertPEM, clientKeyPEM, err := initCA(cfg, logger)
 	if err != nil {
@@ -159,12 +173,6 @@ func runServe(args []string) {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
-
-	ctx, stop := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGINT, syscall.SIGTERM,
-	)
-	defer stop()
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server error", "error", err)

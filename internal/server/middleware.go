@@ -7,8 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/inspector"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/telemetry"
 )
 
 type responseRecorder struct {
@@ -65,13 +70,40 @@ func (s *Server) recordingMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rec, r)
 
+		latencyMS := time.Since(start).Milliseconds()
+
+		ctx, span := otel.Tracer("mtls-sandbox").Start(r.Context(), "tls.inspect")
+		report := s.inspect(r)
+		handshakeOK := report != nil && report.HandshakeOK
+		span.SetAttributes(
+			attribute.Bool("handshake.ok", handshakeOK),
+		)
+		if report != nil && report.FailureReason != "" {
+			span.SetAttributes(attribute.String("failure_code", report.FailureReason))
+		}
+		span.End()
+
+		// Record metrics.
+		telemetry.Metrics.InboundRequests.Add(ctx, 1,
+			otelmetric.WithAttributes(
+				attribute.Int("status", rec.statusCode),
+				attribute.Bool("handshake_ok", handshakeOK),
+			),
+		)
+		telemetry.Metrics.InboundLatency.Record(ctx, float64(latencyMS),
+			otelmetric.WithAttributes(attribute.String("path", r.URL.Path)),
+		)
+		telemetry.Metrics.HandshakeResults.Add(ctx, 1,
+			otelmetric.WithAttributes(attribute.Bool("ok", handshakeOK)),
+		)
+
 		entry := store.RequestEntry{
 			Timestamp: time.Now().Format(time.RFC3339),
 			Method:    r.Method,
 			Path:      r.URL.Path,
 			Status:    rec.statusCode,
-			LatencyMS: time.Since(start).Milliseconds(),
-			Report:    s.inspect(r),
+			LatencyMS: latencyMS,
+			Report:    report,
 		}
 
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {

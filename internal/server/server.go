@@ -15,14 +15,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sebdeveloper6952/mtls-sandbox/config"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/client"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/mock"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ratelimit"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/safedial"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/session"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/store"
+	"github.com/sebdeveloper6952/mtls-sandbox/internal/telemetry"
 	"github.com/sebdeveloper6952/mtls-sandbox/internal/ui"
+
+	"github.com/sebdeveloper6952/mtls-sandbox/config"
 )
 
 // Deps holds optional dependencies injected into the server.
@@ -117,7 +124,7 @@ func New(cfg *config.Config, caCertPEM, serverCertPEM, serverKeyPEM []byte, logg
 
 	s.httpServer = &http.Server{
 		Addr:      fmt.Sprintf(":%d", cfg.Port),
-		Handler:   mux,
+		Handler:   otelhttp.NewHandler(mux, "mtls"),
 		TLSConfig: tlsCfg,
 	}
 
@@ -142,7 +149,7 @@ func New(cfg *config.Config, caCertPEM, serverCertPEM, serverKeyPEM []byte, logg
 
 	s.healthServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.HealthPort),
-		Handler: healthMux,
+		Handler: otelhttp.NewHandler(healthMux, "api"),
 	}
 
 	return s, nil
@@ -306,6 +313,9 @@ func (s *Server) getRequestHandler(w http.ResponseWriter, r *http.Request) {
 // --- Session API handlers ---
 
 func (s *Server) createSessionHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("mtls-sandbox").Start(r.Context(), "session.create")
+	defer span.End()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
@@ -317,6 +327,10 @@ func (s *Server) createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+
+	span.SetAttributes(attribute.String("session.id", sess.ID))
+	telemetry.Metrics.SessionsCreated.Add(ctx, 1)
+	telemetry.Metrics.ActiveSessions.Add(ctx, 1)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -416,6 +430,10 @@ func (s *Server) updateSessionHandler(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id string) {
+	ctx, span := otel.Tracer("mtls-sandbox").Start(r.Context(), "session.test")
+	defer span.End()
+	span.SetAttributes(attribute.String("session.id", id))
+
 	// Rate limit.
 	if s.rateLimiter != nil && !s.rateLimiter.Allow(id) {
 		http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
@@ -480,16 +498,33 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Attach SSRF-safe dialer to the transport.
+	// Attach SSRF-safe dialer and OTel transport wrapper.
 	transport := httpClient.Transport.(*http.Transport)
 	dialer := &safedial.SafeDialer{}
 	transport.DialContext = dialer.DialContext
+	httpClient.Transport = otelhttp.NewTransport(transport)
+
+	span.SetAttributes(attribute.String("test.mode", string(mode)))
 
 	// Make the outbound call.
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	probeResult := client.Probe(ctx, httpClient, sess.CallbackURL, nil, nil)
+	_, probeSpan := otel.Tracer("mtls-sandbox").Start(probeCtx, "outbound.probe")
+	probeResult := client.Probe(probeCtx, httpClient, sess.CallbackURL, nil, nil)
+	probeSpan.SetAttributes(
+		attribute.Int("http.status_code", probeResult.StatusCode),
+		attribute.Int64("duration_ms", int64(probeResult.DurationMS)),
+	)
+	probeSpan.End()
+
+	telemetry.Metrics.OutboundProbes.Add(ctx, 1,
+		otelmetric.WithAttributes(
+			attribute.String("test_mode", string(mode)),
+			attribute.Int("status_code", probeResult.StatusCode),
+		),
+	)
+	telemetry.Metrics.OutboundLatency.Record(ctx, float64(probeResult.DurationMS))
 
 	// Store the call.
 	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, mode, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
