@@ -86,6 +86,7 @@ export interface CertsResponse {
 export interface StatusResponse {
 	mode: string;
 	started_at: string;
+	version?: string;
 	persist_path?: string;
 	mtls_port?: number;
 }
