@@ -38,6 +38,7 @@ type CallRecord struct {
 	CreatedAt   string             `json:"created_at"`
 	CallbackURL string             `json:"callback_url"`
 	TestMode    string             `json:"test_mode"`
+	HTTPMethod  string             `json:"http_method"`
 	StatusCode  int                `json:"status_code"`
 	DurationMS  int64              `json:"duration_ms"`
 	Error       string             `json:"error,omitempty"`
@@ -215,7 +216,7 @@ func (s *Store) UpdateCallbackURL(id, url string) error {
 }
 
 // AddCall records a test call result and returns the call ID.
-func (s *Store) AddCall(sessionID string, callbackURL string, testMode TestMode, statusCode int, durationMS int64, callError string, probeResult *client.ProbeResult) (int64, error) {
+func (s *Store) AddCall(sessionID string, callbackURL string, testMode TestMode, httpMethod string, statusCode int, durationMS int64, callError string, probeResult *client.ProbeResult) (int64, error) {
 	var probeJSON []byte
 	if probeResult != nil {
 		var err error
@@ -225,9 +226,13 @@ func (s *Store) AddCall(sessionID string, callbackURL string, testMode TestMode,
 		}
 	}
 
+	if httpMethod == "" {
+		httpMethod = "GET"
+	}
+
 	result, err := s.db.Exec(
-		`INSERT INTO call_history (session_id, created_at, callback_url, test_mode, status_code, duration_ms, error, probe_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, time.Now().UTC().Format(time.RFC3339), callbackURL, string(testMode), statusCode, durationMS, nullString(callError), probeJSON,
+		`INSERT INTO call_history (session_id, created_at, callback_url, test_mode, http_method, status_code, duration_ms, error, probe_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, time.Now().UTC().Format(time.RFC3339), callbackURL, string(testMode), httpMethod, statusCode, durationMS, nullString(callError), probeJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting call record: %w", err)
@@ -245,7 +250,7 @@ func (s *Store) ListCalls(sessionID string, limit, offset int) ([]CallRecord, in
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, session_id, created_at, callback_url, test_mode, status_code, duration_ms, error, probe_result FROM call_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		`SELECT id, session_id, created_at, callback_url, test_mode, http_method, status_code, duration_ms, error, probe_result FROM call_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		sessionID, limit, offset,
 	)
 	if err != nil {
@@ -258,7 +263,7 @@ func (s *Store) ListCalls(sessionID string, limit, offset int) ([]CallRecord, in
 		var c CallRecord
 		var callErr sql.NullString
 		var probeJSON sql.NullString
-		err := rows.Scan(&c.ID, &c.SessionID, &c.CreatedAt, &c.CallbackURL, &c.TestMode, &c.StatusCode, &c.DurationMS, &callErr, &probeJSON)
+		err := rows.Scan(&c.ID, &c.SessionID, &c.CreatedAt, &c.CallbackURL, &c.TestMode, &c.HTTPMethod, &c.StatusCode, &c.DurationMS, &callErr, &probeJSON)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scanning call: %w", err)
 		}

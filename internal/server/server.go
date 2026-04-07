@@ -456,10 +456,12 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Parse test mode from request body (optional).
+	// Parse test mode and HTTP method from request body (optional).
 	mode := session.TestModeNormal
+	httpMethod := "GET"
 	var body struct {
-		TestMode string `json:"test_mode"`
+		TestMode   string `json:"test_mode"`
+		HTTPMethod string `json:"http_method"`
 	}
 	if r.Body != nil {
 		json.NewDecoder(r.Body).Decode(&body)
@@ -467,6 +469,15 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 	switch session.TestMode(body.TestMode) {
 	case session.TestModeNoCert, session.TestModeWrongCA:
 		mode = session.TestMode(body.TestMode)
+	}
+	switch body.HTTPMethod {
+	case "GET", "POST", "HEAD", "PUT", "DELETE":
+		httpMethod = body.HTTPMethod
+	case "":
+		// default GET
+	default:
+		http.Error(w, `{"error":"http_method must be one of GET, POST, HEAD, PUT, DELETE"}`, http.StatusBadRequest)
+		return
 	}
 
 	// Build HTTP client based on test mode.
@@ -511,7 +522,7 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 	defer cancel()
 
 	_, probeSpan := otel.Tracer("mtls-sandbox").Start(probeCtx, "outbound.probe")
-	probeResult := client.Probe(probeCtx, httpClient, sess.CallbackURL, nil, nil)
+	probeResult := client.Probe(probeCtx, httpClient, httpMethod, sess.CallbackURL, nil, nil)
 	probeSpan.SetAttributes(
 		attribute.Int("http.status_code", probeResult.StatusCode),
 		attribute.Int64("duration_ms", int64(probeResult.DurationMS)),
@@ -527,7 +538,7 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 	telemetry.Metrics.OutboundLatency.Record(ctx, float64(probeResult.DurationMS))
 
 	// Store the call.
-	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, mode, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
+	callID, err := s.sessionStore.AddCall(id, sess.CallbackURL, mode, httpMethod, probeResult.StatusCode, probeResult.DurationMS, probeResult.Error, probeResult)
 	if err != nil {
 		s.logger.Error("failed to store call", "error", err)
 	}
@@ -535,6 +546,7 @@ func (s *Server) testSessionHandler(w http.ResponseWriter, r *http.Request, id s
 	json.NewEncoder(w).Encode(map[string]any{
 		"call_id":      callID,
 		"test_mode":    mode,
+		"http_method":  httpMethod,
 		"callback_url": sess.CallbackURL,
 		"status_code":  probeResult.StatusCode,
 		"duration_ms":  probeResult.DurationMS,

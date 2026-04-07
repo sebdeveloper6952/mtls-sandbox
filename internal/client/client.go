@@ -77,12 +77,12 @@ func NewHTTPClient(cfg Config) (*http.Client, error) {
 	}, nil
 }
 
-// Ping makes a single GET request and returns a concise result.
-func Ping(ctx context.Context, httpClient *http.Client, url string) *PingResult {
+// Ping makes a single request and returns a concise result.
+func Ping(ctx context.Context, httpClient *http.Client, method, url string) *PingResult {
 	result := &PingResult{URL: url}
 	start := time.Now()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		result.DurationMS = time.Since(start).Milliseconds()
 		result.Error = err.Error()
@@ -112,14 +112,14 @@ func Ping(ctx context.Context, httpClient *http.Client, url string) *PingResult 
 	return result
 }
 
-// Probe makes a GET request and runs the full inspector analysis on the server's
+// Probe makes an HTTP request and runs the full inspector analysis on the server's
 // TLS configuration. trustedCA and caPool are optional — when nil, chain
 // verification against a specific CA is skipped.
-func Probe(ctx context.Context, httpClient *http.Client, url string, trustedCA *x509.Certificate, caPool *x509.CertPool) *ProbeResult {
+func Probe(ctx context.Context, httpClient *http.Client, method, url string, trustedCA *x509.Certificate, caPool *x509.CertPool) *ProbeResult {
 	result := &ProbeResult{URL: url}
 	start := time.Now()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		result.DurationMS = time.Since(start).Milliseconds()
 		result.Error = err.Error()

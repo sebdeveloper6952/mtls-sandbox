@@ -48,6 +48,7 @@ export interface CallRecord {
 	created_at: string;
 	callback_url: string;
 	test_mode: string;
+	http_method: string;
 	status_code: number;
 	duration_ms: number;
 	error?: string;
@@ -105,6 +106,7 @@ export interface MonitorEntry {
 export interface TestResult {
 	status_code?: number;
 	duration_ms?: number;
+	http_method?: string;
 	error?: string;
 	probe_result?: ProbeResult;
 }

@@ -139,7 +139,7 @@ func TestPing_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := Ping(context.Background(), httpClient, url+"/")
+	result := Ping(context.Background(), httpClient, "GET", url+"/")
 
 	if !result.OK {
 		t.Errorf("expected OK, got error: %s", result.Error)
@@ -164,7 +164,7 @@ func TestPing_ConnectionRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result := Ping(ctx, httpClient, "https://127.0.0.1:1/unreachable")
+	result := Ping(ctx, httpClient, "GET", "https://127.0.0.1:1/unreachable")
 
 	if result.OK {
 		t.Error("expected failure")
@@ -188,7 +188,7 @@ func TestProbe_Success(t *testing.T) {
 	}
 
 	caCert, caPool, _ := ParseCACert(env.authority.CertPEM)
-	result := Probe(context.Background(), httpClient, url+"/", caCert, caPool)
+	result := Probe(context.Background(), httpClient, "GET", url+"/", caCert, caPool)
 
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
@@ -222,7 +222,7 @@ func TestProbe_Insecure(t *testing.T) {
 	}
 
 	// Probe without CA for chain verification — should still get TLS state.
-	result := Probe(context.Background(), httpClient, url+"/", nil, nil)
+	result := Probe(context.Background(), httpClient, "GET", url+"/", nil, nil)
 
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)

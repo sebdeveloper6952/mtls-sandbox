@@ -33,11 +33,11 @@ export async function updateCallbackURL(id: string, url: string): Promise<void> 
 	});
 }
 
-export function triggerTest(id: string, mode: string): Promise<TestResult> {
+export function triggerTest(id: string, mode: string, httpMethod: string = 'GET'): Promise<TestResult> {
 	return fetchJSON(`/api/sessions/${id}/test`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ test_mode: mode })
+		body: JSON.stringify({ test_mode: mode, http_method: httpMethod })
 	});
 }
 

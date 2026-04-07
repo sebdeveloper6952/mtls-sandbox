@@ -198,7 +198,7 @@ func runPing(args []string) {
 		os.Exit(1)
 	}
 
-	result := client.Ping(context.Background(), httpClient, url)
+	result := client.Ping(context.Background(), httpClient, "GET", url)
 
 	if result.OK {
 		fmt.Printf("OK  %d  %s  CN=%s  %s  %dms\n",
@@ -231,7 +231,7 @@ func runProbe(args []string) {
 		os.Exit(1)
 	}
 
-	result := client.Probe(context.Background(), httpClient, url, caCert, caPool)
+	result := client.Probe(context.Background(), httpClient, "GET", url, caCert, caPool)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

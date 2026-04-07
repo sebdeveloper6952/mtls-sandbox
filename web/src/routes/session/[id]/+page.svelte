@@ -29,6 +29,7 @@
 	let testFeedback = $state('');
 	let testFeedbackOk = $state(false);
 	let testingMode = $state('');
+	let selectedMethod = $state('GET');
 
 	const id = $derived(page.params.id);
 
@@ -96,7 +97,7 @@
 		testFeedback = '';
 		testingMode = mode;
 		try {
-			const result = await triggerTest(id, mode);
+			const result = await triggerTest(id, mode, selectedMethod);
 			if (result.error) {
 				testFeedback = result.error;
 				testFeedbackOk = false;
@@ -358,6 +359,20 @@ tlsCfg := &tls.Config&#123;
 				<div class="card bg-base-200">
 					<div class="card-body">
 						<h2 class="card-title text-lg">Step 3 — Run Tests</h2>
+						<div class="mt-2 flex items-center gap-3">
+							<span class="text-sm font-medium opacity-70">HTTP Method</span>
+							<div class="join">
+								{#each ['GET', 'POST', 'HEAD', 'PUT', 'DELETE'] as method}
+									<button
+										class="btn btn-sm join-item"
+										class:btn-active={selectedMethod === method}
+										onclick={() => (selectedMethod = method)}
+									>
+										{method}
+									</button>
+								{/each}
+							</div>
+						</div>
 						<div class="mt-2 grid grid-cols-1 gap-4 md:grid-cols-3">
 							<div class="flex flex-col items-center gap-2 text-center">
 								<button
@@ -426,6 +441,7 @@ tlsCfg := &tls.Config&#123;
 									<thead>
 										<tr>
 											<th>Time</th>
+											<th>Method</th>
 											<th>Mode</th>
 											<th>Status</th>
 											<th>Result</th>
@@ -438,6 +454,7 @@ tlsCfg := &tls.Config&#123;
 											{@const hasError = !!call.error}
 											<tr class="hover cursor-pointer" onclick={() => toggleCall(i)}>
 												<td>{timeAgo(call.created_at)}</td>
+												<td><span class="font-mono text-xs">{call.http_method || 'GET'}</span></td>
 												<td>
 													<span
 														class="badge badge-sm"
@@ -461,7 +478,7 @@ tlsCfg := &tls.Config&#123;
 											</tr>
 											{#if expandedCalls.has(i)}
 												<tr>
-													<td colspan="5" class="bg-base-300/50">
+													<td colspan="6" class="bg-base-300/50">
 														<InspectionDetail
 															report={call.probe_result?.inspection}
 															error={call.error}
